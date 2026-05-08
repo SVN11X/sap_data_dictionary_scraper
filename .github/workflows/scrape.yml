@@ -13,15 +13,20 @@ on:
         required: false
         default: '0'
         type: string
+      workers:
+        description: 'Concurrent HTTP workers (default: 8)'
+        required: false
+        default: '8'
+        type: string
       skip_fields:
         description: 'Skip field extraction (catalog only)'
         required: false
         default: false
         type: boolean
       delay:
-        description: 'Delay between HTTP requests (seconds)'
+        description: 'Per-worker delay between requests (seconds)'
         required: false
-        default: '1.5'
+        default: '0.3'
         type: string
 
 permissions:
@@ -52,10 +57,11 @@ jobs:
       - name: Run scraper
         env:
           MAX_TABLES: ${{ github.event.inputs.max_tables || '0' }}
+          WORKERS: ${{ github.event.inputs.workers || '8' }}
           SKIP_FIELDS: ${{ github.event.inputs.skip_fields || 'false' }}
-          DELAY: ${{ github.event.inputs.delay || '1.5' }}
+          DELAY: ${{ github.event.inputs.delay || '0.3' }}
         run: |
-          ARGS="--delay $DELAY"
+          ARGS="--delay $DELAY --workers $WORKERS"
           if [ "$MAX_TABLES" != "0" ]; then
             ARGS="$ARGS --max-tables $MAX_TABLES"
           fi
