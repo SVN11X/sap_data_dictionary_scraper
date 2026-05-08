@@ -1,0 +1,114 @@
+name: SAP Data Dictionary Scraper
+
+on:
+  # Weekly schedule: every Sunday at 03:00 UTC
+  schedule:
+    - cron: '0 3 * * 0'
+
+  # Manual trigger with configurable options
+  workflow_dispatch:
+    inputs:
+      max_tables:
+        description: 'Max tables to scrape fields for (0 = all)'
+        required: false
+        default: '0'
+        type: string
+      skip_fields:
+        description: 'Skip field extraction (catalog only)'
+        required: false
+        default: false
+        type: boolean
+      delay:
+        description: 'Delay between HTTP requests (seconds)'
+        required: false
+        default: '1.5'
+        type: string
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360  # 6 hours max
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run scraper
+        env:
+          MAX_TABLES: ${{ github.event.inputs.max_tables || '0' }}
+          SKIP_FIELDS: ${{ github.event.inputs.skip_fields || 'false' }}
+          DELAY: ${{ github.event.inputs.delay || '1.5' }}
+        run: |
+          ARGS="--delay $DELAY"
+          if [ "$MAX_TABLES" != "0" ]; then
+            ARGS="$ARGS --max-tables $MAX_TABLES"
+          fi
+          if [ "$SKIP_FIELDS" = "true" ]; then
+            ARGS="$ARGS --skip-fields"
+          fi
+          echo "Running: python scripts/scraper.py $ARGS"
+          python scripts/scraper.py $ARGS
+
+      - name: Commit and push data
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add data/
+
+          # Check if there are changes
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
+          else
+            TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M UTC")
+            TABLES=$(python3 -c "import json; d=json.load(open('data/metadata.json')); print(d['summary']['total_tables_discovered'])" 2>/dev/null || echo "?")
+            FIELDS=$(python3 -c "import json; d=json.load(open('data/metadata.json')); print(d['summary']['total_fields_extracted'])" 2>/dev/null || echo "?")
+
+            git commit -m "🔄 Scraper update: ${TABLES} tables, ${FIELDS} fields [${TIMESTAMP}]"
+            git push
+          fi
+
+  # Deploy GitHub Pages after data is committed
+  deploy-pages:
+    needs: scrape
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main  # Ensure we get the latest commit from scrape job
+
+      - name: Pull latest changes
+        run: git pull origin main
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: '.'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
