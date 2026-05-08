@@ -1,274 +1,422 @@
 #!/usr/bin/env python3
 """
-SAP Data Dictionary Scraper — GitHub Actions Edition
-=====================================================
-Standalone scraper adapted from nb_komatsu_bambu_scraping_sap_table.
-Extracts ABAP table catalog and field structures from sapdatasheet.org,
-saves results as JSON files in the data/ directory.
+SAP Data Dictionary Scraper — GitHub Actions Edition (Parallel)
+================================================================
+High-performance async scraper for sapdatasheet.org ABAP table dictionary.
 
-Features:
-  - Dynamic discovery of all index pages (CLUSTER, POOL, SLASH, A–W)
-  - Exponential-backoff retries for HTTP errors
-  - Resumable: compares against existing data to skip already-scraped tables
-  - Writes compact JSON for GitHub-friendly storage
-  - Generates metadata.json with extraction stats and timestamps
+Optimizations vs. sequential version:
+  - Async HTTP (httpx.AsyncClient) with multiple requests in flight
+  - Semaphore-controlled concurrency (default: 8 workers)
+  - Connection pooling with keep-alive
+  - lxml parser (~5x faster than html.parser)
+  - Parallel index page discovery (wave-based async BFS)
+  - Parallel field extraction (asyncio.gather per batch)
+  - Adaptive delay: per-worker throttle, not global blocking sleep
+  - Precompiled regex patterns
+  - Incremental saves every batch (safe on interruption)
+
+Estimated speedup: ~10-20x vs sequential version
 
 Usage:
-  python scripts/scraper.py [--max-tables N] [--delay SECONDS] [--skip-fields]
+  python scripts/scraper.py [--max-tables N] [--workers 8] [--delay 0.3]
 """
 
 import argparse
+import asyncio
 import json
 import os
 import re
+import signal
 import sys
 import time
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
-from urllib.parse import urljoin, urlparse
+from typing import Any, Dict, List, Optional, Set, Tuple
+from urllib.parse import urljoin
 
 import httpx
 from bs4 import BeautifulSoup
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
-ABAP_TYPES = {
+ABAP_TYPES: frozenset = frozenset({
     "ACCP", "CHAR", "CLNT", "CUKY", "CURR", "DATS", "DEC",
     "DF16_DEC", "DF16_RAW", "DF34_DEC", "DF34_RAW",
     "FLTP", "INT1", "INT2", "INT4", "INT8", "LANG", "LCHR", "LRAW",
     "NUMC", "PREC", "QUAN", "RAW", "RAWSTRING", "SSTRING", "STRING",
     "TIMS", "UNIT", "VARC",
-}
+})
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
-# ─── Scraper Class ────────────────────────────────────────────────────────────
+# Precompiled regex
+RE_WHITESPACE = re.compile(r"\s+")
+RE_INDEX_PAGE = re.compile(r"index-[a-z0-9]+(?:-\d+)?\.html")
 
-class SAPDataDictScraper:
+SOURCE_NAME = "sapdatasheet"
+BASE_URL = "https://www.sapdatasheet.org"
+INDEX_URL = f"{BASE_URL}/abap/tabl/"
+
+
+# ─── Fast URL helpers ─────────────────────────────────────────────────────────
+
+def _resolve(base: str, href: str) -> str:
+    """Resolve relative URL and strip fragment."""
+    return urljoin(base, href).split("#")[0]
+
+
+def _url_path(url: str) -> str:
+    """Extract lowercase path from URL — faster than urlparse for hot loop."""
+    after = url.split("://", 1)[-1]
+    parts = after.split("/", 1)
+    if len(parts) < 2:
+        return "/"
+    return ("/" + parts[1].split("?")[0].split("#")[0]).lower()
+
+
+# ─── Pure parsing functions (no I/O) ─────────────────────────────────────────
+
+def _parse_index_page(html: str, page_url: str, seen_tables: Set[str]):
     """
-    Reusable scraper for sapdatasheet.org ABAP table dictionary.
-    Discovers index pages dynamically, extracts table catalog and field structures.
+    Parse one index page. Returns (new_index_urls, new_table_dicts).
+    Pure function — no network calls.
     """
+    soup = BeautifulSoup(html, "lxml")
+    new_indexes: List[str] = []
+    new_tables: List[Dict[str, str]] = []
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    # Collect sub-index links
+    for a in soup.find_all("a", href=True):
+        abs_url = _resolve(page_url, a["href"])
+        path = _url_path(abs_url)
+        fname = path.rsplit("/", 1)[-1]
+        if path.startswith("/abap/tabl/") and RE_INDEX_PAGE.fullmatch(fname):
+            new_indexes.append(abs_url)
+
+    # Collect table rows
+    for tr in soup.find_all("tr"):
+        row_texts = []
+        for cell in tr.find_all(["td", "th"]):
+            txt = cell.get_text(strip=True)
+            if txt:
+                row_texts.append(RE_WHITESPACE.sub(" ", cell.get_text(" ", strip=True)))
+
+        # Find the table link in this row
+        table_link = None
+        for a in tr.find_all("a", href=True):
+            text = RE_WHITESPACE.sub(" ", a.get_text(" ", strip=True)).upper()
+            if not text:
+                continue
+            abs_url = _resolve(page_url, a["href"])
+            path = _url_path(abs_url)
+            fname = path.rsplit("/", 1)[-1]
+            if (
+                path.startswith("/abap/tabl/")
+                and fname.endswith(".html")
+                and not fname.startswith("index-")
+            ):
+                table_link = (text, abs_url)
+                break
+
+        if not table_link:
+            continue
+
+        table_name, table_url = table_link
+        if table_name in seen_tables:
+            continue
+        seen_tables.add(table_name)
+
+        # Extract metadata from adjacent cells
+        description = ""
+        table_category = ""
+        delivery_class = ""
+        upper_texts = [x.upper() for x in row_texts]
+        if table_name in upper_texts:
+            idx = upper_texts.index(table_name)
+            after = row_texts[idx + 1:]
+            description = after[0] if len(after) > 0 else ""
+            table_category = after[1] if len(after) > 1 else ""
+            delivery_class = after[2] if len(after) > 2 else ""
+
+        new_tables.append({
+            "source": SOURCE_NAME,
+            "table_name": table_name,
+            "table_url": table_url,
+            "description": description,
+            "table_category": table_category,
+            "delivery_class": delivery_class,
+            "discovered_at_utc": now,
+        })
+
+    return new_indexes, new_tables
+
+
+def _parse_fields(html: str, table_name: str, table_url: str) -> List[Dict[str, str]]:
+    """Parse field structure from a table detail page."""
+    soup = BeautifulSoup(html, "lxml")
+    rows: List[Dict[str, str]] = []
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    for tr in soup.find_all("tr"):
+        cells = [
+            RE_WHITESPACE.sub(" ", td.get_text(" ", strip=True))
+            for td in tr.find_all("td")
+            if td.get_text(strip=True)
+        ]
+        if not cells or not cells[0].isdigit() or len(cells) < 2:
+            continue
+
+        position = cells[0]
+        values = cells[1:]
+        field_name = values[0]
+
+        type_idx = next(
+            (i for i, v in enumerate(values) if v.upper() in ABAP_TYPES and i > 0),
+            None,
+        )
+
+        de = dom = dt = ln = dec = desc = chk = ""
+
+        if type_idx is not None:
+            dt = values[type_idx].upper()
+            de = values[1] if type_idx >= 2 else ""
+            dom = values[type_idx - 1] if type_idx >= 1 else ""
+            ln = values[type_idx + 1] if len(values) > type_idx + 1 else ""
+            dec = values[type_idx + 2] if len(values) > type_idx + 2 else ""
+            desc = values[type_idx + 3] if len(values) > type_idx + 3 else ""
+            chk = values[type_idx + 4] if len(values) > type_idx + 4 else ""
+        else:
+            desc = " ".join(values[1:])
+
+        rows.append({
+            "source": SOURCE_NAME,
+            "table_name": table_name,
+            "table_url": table_url,
+            "position": position,
+            "field_name": field_name,
+            "data_element": de,
+            "domain": dom,
+            "data_type": dt,
+            "length": ln,
+            "decimals": dec,
+            "description": desc,
+            "check_table": chk,
+            "scraped_at_utc": now,
+        })
+
+    rows.sort(key=lambda r: int(r["position"]) if r["position"].isdigit() else 99999)
+    return rows
+
+
+# ─── Async Scraper Engine ─────────────────────────────────────────────────────
+
+class AsyncSAPScraper:
+    """Parallel async scraper with semaphore-controlled concurrency."""
 
     def __init__(
         self,
-        base_url: str = "https://www.sapdatasheet.org",
-        source: str = "sapdatasheet",
-        delay_seconds: float = 1.5,
+        max_workers: int = 8,
+        delay_seconds: float = 0.3,
         max_retries: int = 4,
-        timeout_seconds: int = 40,
+        timeout_seconds: int = 30,
     ):
-        self.base_url = base_url.rstrip("/")
-        self.source = source
-        self.index_url = f"{self.base_url}/abap/tabl/"
-        self.delay_seconds = delay_seconds
+        self.max_workers = max_workers
+        self.delay = delay_seconds
         self.max_retries = max_retries
-        self.client = httpx.Client(
-            timeout=timeout_seconds,
+        self.timeout = timeout_seconds
+        self.request_count = 0
+        self.error_count = 0
+        self._sem: Optional[asyncio.Semaphore] = None
+        self._client: Optional[httpx.AsyncClient] = None
+        self._shutdown = False
+
+    async def start(self):
+        """Initialize async client and semaphore."""
+        self._sem = asyncio.Semaphore(self.max_workers)
+        self._client = httpx.AsyncClient(
+            limits=httpx.Limits(
+                max_connections=self.max_workers + 4,
+                max_keepalive_connections=self.max_workers,
+                keepalive_expiry=30,
+            ),
+            timeout=self.timeout,
             follow_redirects=True,
             headers={
                 "User-Agent": (
                     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
                 ),
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": "en-US,en;q=0.5",
+                "Accept-Encoding": "gzip, deflate",
             },
         )
-        self._request_count = 0
 
-    # ── HTTP helper ───────────────────────────────────────────────────────
+    async def close(self):
+        if self._client:
+            await self._client.aclose()
 
-    def _get(self, url: str) -> str:
-        last_error: Optional[Exception] = None
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                resp = self.client.get(url)
-                resp.raise_for_status()
-                self._request_count += 1
-                time.sleep(self.delay_seconds)
-                return resp.text
-            except Exception as exc:
-                last_error = exc
-                wait = self.delay_seconds * (2 ** (attempt - 1))
-                print(
-                    f"  [{attempt}/{self.max_retries}] Error fetching {url}: {exc}. "
-                    f"Retrying in {wait:.1f}s …"
-                )
-                time.sleep(wait)
-        raise RuntimeError(f"Failed to fetch {url}: {last_error}")
+    def shutdown(self):
+        self._shutdown = True
 
-    # ── Step 1: Discover table catalog ────────────────────────────────────
+    # ── Core HTTP fetch with concurrency control ──────────────────────────
 
-    def discover_tables(self) -> Iterable[Dict[str, str]]:
-        """Yield table metadata dicts by crawling all index pages."""
-        pending_pages = [self.index_url]
-        visited_pages: set = set()
-        seen_tables: set = set()
+    async def fetch(self, url: str) -> Optional[str]:
+        """Fetch URL with semaphore, retries, per-worker delay."""
+        if self._shutdown:
+            return None
+        async with self._sem:
+            last_err = None
+            for attempt in range(1, self.max_retries + 1):
+                if self._shutdown:
+                    return None
+                try:
+                    resp = await self._client.get(url)
+                    resp.raise_for_status()
+                    self.request_count += 1
+                    await asyncio.sleep(self.delay)
+                    return resp.text
+                except Exception as e:
+                    last_err = e
+                    self.error_count += 1
+                    if attempt < self.max_retries:
+                        await asyncio.sleep(self.delay * (2 ** attempt))
+            # All retries failed
+            print(f"  ✗ Failed ({self.max_retries} attempts): {url} — {last_err}")
+            return None
 
-        while pending_pages:
-            page_url = pending_pages.pop(0)
-            if page_url in visited_pages:
-                continue
+    # ── Phase 1: Parallel index discovery (wave-based BFS) ────────────────
 
-            try:
-                html = self._get(page_url)
-            except RuntimeError as e:
-                print(f"  ⚠ Skipping page {page_url}: {e}")
-                continue
+    async def discover_tables(self) -> List[Dict[str, str]]:
+        """Crawl index pages with parallel BFS waves."""
+        pending: deque = deque([INDEX_URL])
+        visited: Set[str] = set()
+        seen_tables: Set[str] = set()
+        all_tables: List[Dict[str, str]] = []
 
-            visited_pages.add(page_url)
-            soup = BeautifulSoup(html, "html.parser")
+        while pending and not self._shutdown:
+            # Build next wave: up to max_workers URLs
+            wave = []
+            while pending and len(wave) < self.max_workers * 2:
+                url = pending.popleft()
+                if url not in visited:
+                    visited.add(url)
+                    wave.append(url)
+            if not wave:
+                break
 
-            # Discover sub-index pages
-            for a in soup.find_all("a", href=True):
-                abs_url = urljoin(page_url, a["href"]).split("#")[0]
-                path = urlparse(abs_url).path.lower()
-                file_name = path.rsplit("/", 1)[-1]
-                is_index = (
-                    path.startswith("/abap/tabl/")
-                    and re.fullmatch(r"index-[a-z0-9]+(?:-\d+)?\.html", file_name)
-                )
-                if is_index and abs_url not in visited_pages and abs_url not in pending_pages:
-                    pending_pages.append(abs_url)
-
-            # Extract table rows
-            for tr in soup.find_all("tr"):
-                row_texts = [
-                    re.sub(r"\s+", " ", cell.get_text(" ", strip=True))
-                    for cell in tr.find_all(["td", "th"])
-                    if cell.get_text(strip=True)
-                ]
-
-                table_link = None
-                for a in tr.find_all("a", href=True):
-                    text = re.sub(r"\s+", " ", a.get_text(" ", strip=True)).upper()
-                    abs_url = urljoin(page_url, a["href"]).split("#")[0]
-                    path = urlparse(abs_url).path.lower()
-                    file_name = path.rsplit("/", 1)[-1]
-                    is_table_page = (
-                        text
-                        and path.startswith("/abap/tabl/")
-                        and file_name.endswith(".html")
-                        and not file_name.startswith("index-")
-                    )
-                    if is_table_page:
-                        table_link = (text, abs_url)
-                        break
-
-                if not table_link:
-                    continue
-
-                table_name, table_url = table_link
-                if table_name in seen_tables:
-                    continue
-                seen_tables.add(table_name)
-
-                description = ""
-                table_category = ""
-                delivery_class = ""
-                upper_texts = [x.upper() for x in row_texts]
-                if table_name in upper_texts:
-                    idx = upper_texts.index(table_name)
-                    after = row_texts[idx + 1:]
-                    description = after[0] if len(after) > 0 else ""
-                    table_category = after[1] if len(after) > 1 else ""
-                    delivery_class = after[2] if len(after) > 2 else ""
-
-                yield {
-                    "source": self.source,
-                    "table_name": table_name,
-                    "table_url": table_url,
-                    "description": description,
-                    "table_category": table_category,
-                    "delivery_class": delivery_class,
-                    "discovered_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                }
-
-            if len(visited_pages) % 5 == 0:
-                print(
-                    f"  Index progress: {len(visited_pages)} pages visited, "
-                    f"{len(seen_tables)} tables found, "
-                    f"{len(pending_pages)} pages queued"
-                )
-
-    # ── Step 2: Extract field structure ───────────────────────────────────
-
-    def table_fields(self, table_name: str, table_url: str) -> List[Dict[str, str]]:
-        """Extract the field/column structure for a single SAP table."""
-        html = self._get(table_url)
-        soup = BeautifulSoup(html, "html.parser")
-        rows: List[Dict[str, str]] = []
-
-        for tr in soup.find_all("tr"):
-            cells = [
-                re.sub(r"\s+", " ", td.get_text(" ", strip=True))
-                for td in tr.find_all("td")
-                if td.get_text(strip=True)
-            ]
-            if not cells or not cells[0].isdigit() or len(cells) < 2:
-                continue
-
-            position = cells[0]
-            values = cells[1:]
-            field_name = values[0]
-
-            type_idx = next(
-                (
-                    idx
-                    for idx, v in enumerate(values)
-                    if v.upper() in ABAP_TYPES and idx > 0
-                ),
-                None,
+            # Fetch all wave URLs concurrently
+            htmls = await asyncio.gather(
+                *[self.fetch(url) for url in wave],
+                return_exceptions=True,
             )
 
-            data_element = ""
-            domain = ""
-            data_type = ""
-            length = ""
-            decimals = ""
-            description = ""
-            check_table = ""
+            # Parse results (CPU-bound but fast with lxml)
+            for page_url, html in zip(wave, htmls):
+                if isinstance(html, Exception) or html is None:
+                    continue
+                new_indexes, new_tables = _parse_index_page(html, page_url, seen_tables)
+                all_tables.extend(new_tables)
+                for idx_url in new_indexes:
+                    if idx_url not in visited:
+                        pending.append(idx_url)
 
-            if type_idx is not None:
-                data_type = values[type_idx].upper()
-                data_element = values[1] if type_idx >= 2 else ""
-                domain = values[type_idx - 1] if type_idx >= 1 else ""
-                length = values[type_idx + 1] if len(values) > type_idx + 1 else ""
-                decimals = values[type_idx + 2] if len(values) > type_idx + 2 else ""
-                description = values[type_idx + 3] if len(values) > type_idx + 3 else ""
-                check_table = values[type_idx + 4] if len(values) > type_idx + 4 else ""
-            else:
-                description = " ".join(values[1:])
+            print(
+                f"  Index: {len(visited)} pages | "
+                f"{len(all_tables)} tables | "
+                f"{len(pending)} queued | "
+                f"{self.request_count} reqs"
+            )
 
-            rows.append({
-                "source": self.source,
-                "table_name": table_name,
-                "table_url": table_url,
-                "position": position,
-                "field_name": field_name,
-                "data_element": data_element,
-                "domain": domain,
-                "data_type": data_type,
-                "length": length,
-                "decimals": decimals,
-                "description": description,
-                "check_table": check_table,
-                "scraped_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            })
+        all_tables.sort(key=lambda t: t["table_name"])
+        return all_tables
 
-        rows.sort(key=lambda r: int(r["position"]) if r["position"].isdigit() else 99999)
-        return rows
+    # ── Phase 2: Parallel field extraction ────────────────────────────────
 
-    def close(self):
-        self.client.close()
+    async def extract_fields(
+        self,
+        tables: List[Dict],
+        save_callback=None,
+        batch_size: int = 64,
+    ) -> Tuple[List[Dict], List[Dict]]:
+        """
+        Extract fields for all tables with controlled parallelism.
+        save_callback(fields_chunk, status_chunk) called after each batch.
+        """
+        all_fields = []
+        all_status = []
+        total = len(tables)
+
+        for start in range(0, total, batch_size):
+            if self._shutdown:
+                break
+
+            chunk = tables[start : start + batch_size]
+
+            # Fire all requests in this chunk concurrently
+            # (semaphore inside fetch() controls actual parallelism)
+            tasks = [self._process_one(t) for t in chunk]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            chunk_fields = []
+            chunk_status = []
+            for table, result in zip(chunk, results):
+                if isinstance(result, Exception) or result is None:
+                    chunk_status.append({
+                        "source": SOURCE_NAME,
+                        "table_name": table["table_name"],
+                        "table_url": table["table_url"],
+                        "status": "error",
+                        "field_count": 0,
+                        "error": str(result)[:500] if result else "Fetch failed",
+                        "scraped_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    })
+                else:
+                    fields, status = result
+                    chunk_fields.extend(fields)
+                    chunk_status.append(status)
+
+            all_fields.extend(chunk_fields)
+            all_status.extend(chunk_status)
+
+            done = min(start + batch_size, total)
+            ok = sum(1 for s in chunk_status if s["status"] == "ok")
+            print(
+                f"  [{done}/{total}] "
+                f"+{len(chunk_fields)} fields | "
+                f"{ok}/{len(chunk)} ok | "
+                f"{self.request_count} reqs"
+            )
+
+            if save_callback:
+                save_callback(chunk_fields, chunk_status)
+
+        return all_fields, all_status
+
+    async def _process_one(self, table: Dict) -> Optional[Tuple[List[Dict], Dict]]:
+        """Fetch + parse one table."""
+        html = await self.fetch(table["table_url"])
+        if html is None:
+            return None
+        fields = _parse_fields(html, table["table_name"], table["table_url"])
+        status = {
+            "source": SOURCE_NAME,
+            "table_name": table["table_name"],
+            "table_url": table["table_url"],
+            "status": "ok" if fields else "empty",
+            "field_count": len(fields),
+            "error": None,
+            "scraped_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        return fields, status
 
 
-# ─── File I/O helpers ─────────────────────────────────────────────────────────
+# ─── File I/O ─────────────────────────────────────────────────────────────────
 
 def load_json(path: Path) -> Any:
-    if path.exists():
+    if path.exists() and path.stat().st_size > 2:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     return None
@@ -276,10 +424,12 @@ def load_json(path: Path) -> Any:
 
 def save_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=None, separators=(",", ":"))
+    tmp = path.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
+    tmp.replace(path)  # atomic rename
     size_mb = path.stat().st_size / (1024 * 1024)
-    print(f"  ✓ Saved {path.name} ({size_mb:.2f} MB)")
+    print(f"  💾 {path.name} ({size_mb:.2f} MB)")
 
 
 def save_json_pretty(path: Path, data: Any) -> None:
@@ -288,215 +438,181 @@ def save_json_pretty(path: Path, data: Any) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-# ─── Main pipeline ───────────────────────────────────────────────────────────
+# ─── Main ─────────────────────────────────────────────────────────────────────
 
-def main():
-    parser = argparse.ArgumentParser(description="SAP Data Dictionary Scraper")
-    parser.add_argument("--max-tables", type=int, default=0, help="Limit tables to scrape fields for (0 = all)")
-    parser.add_argument("--delay", type=float, default=1.5, help="Delay between requests in seconds")
-    parser.add_argument("--skip-fields", action="store_true", help="Only discover tables, skip field extraction")
-    parser.add_argument("--resume", action="store_true", default=True, help="Resume from existing data (default: True)")
-    args = parser.parse_args()
-
+async def async_main(args):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-
     tables_path = DATA_DIR / "sap_tables.json"
     fields_path = DATA_DIR / "sap_fields.json"
     status_path = DATA_DIR / "sap_status.json"
     meta_path = DATA_DIR / "metadata.json"
 
     run_start = datetime.now(timezone.utc)
-    print(f"═══ SAP Data Dictionary Scraper ═══")
-    print(f"  Started: {run_start.isoformat(timespec='seconds')}")
+
+    print("═" * 60)
+    print("  SAP Data Dictionary Scraper (Parallel Async)")
+    print("═" * 60)
+    print(f"  Started:  {run_start.isoformat(timespec='seconds')}")
+    print(f"  Workers:  {args.workers} concurrent")
+    print(f"  Delay:    {args.delay}s per worker")
+    print(f"  Throughput: ~{args.workers / max(args.delay, 0.1):.0f} req/s theoretical max")
     print(f"  Data dir: {DATA_DIR}")
     print()
 
-    scraper = SAPDataDictScraper(delay_seconds=args.delay, max_retries=4)
+    scraper = AsyncSAPScraper(
+        max_workers=args.workers,
+        delay_seconds=args.delay,
+        max_retries=4,
+    )
 
-    # ── Phase 1: Discover tables ──────────────────────────────────────────
-    print("▶ Phase 1: Discovering table catalog …")
+    # Graceful shutdown on SIGTERM
+    def on_sigterm(signum, frame):
+        print("\n⚠ SIGTERM — initiating graceful shutdown …")
+        scraper.shutdown()
+    signal.signal(signal.SIGTERM, on_sigterm)
+
+    await scraper.start()
+
+    # ── Phase 1: Discover ─────────────────────────────────────────────────
+    print("▶ PHASE 1: Discovering table catalog …")
+    t0 = time.monotonic()
+
     existing_tables = load_json(tables_path) or []
-    existing_table_names = {t["table_name"] for t in existing_tables}
+    existing_names = {t["table_name"] for t in existing_tables}
 
-    new_tables = []
     try:
-        for table_dict in scraper.discover_tables():
-            if table_dict["table_name"] not in existing_table_names:
-                new_tables.append(table_dict)
-                existing_table_names.add(table_dict["table_name"])
-    except KeyboardInterrupt:
-        print("\n  ⚠ Discovery interrupted — saving partial results")
+        discovered = await scraper.discover_tables()
+        new_tables = [t for t in discovered if t["table_name"] not in existing_names]
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        print("  ⚠ Discovery interrupted")
+        new_tables = []
+        discovered = []
 
-    all_tables = existing_tables + new_tables
-    all_tables.sort(key=lambda t: t["table_name"])
+    # Merge + deduplicate
+    merged = {t["table_name"]: t for t in existing_tables}
+    for t in new_tables:
+        merged[t["table_name"]] = t
+    all_tables = sorted(merged.values(), key=lambda t: t["table_name"])
+
     save_json(tables_path, all_tables)
-    print(f"  Tables discovered: {len(all_tables)} total ({len(new_tables)} new)")
-    print()
+    print(f"  ✅ Catalog: {len(all_tables)} tables ({len(new_tables)} new) in {time.monotonic()-t0:.0f}s\n")
 
     if args.skip_fields:
-        print("  --skip-fields active, skipping field extraction.")
         _write_metadata(meta_path, run_start, all_tables, [], [])
-        scraper.close()
+        await scraper.close()
         return
 
-    # ── Phase 2: Extract fields ───────────────────────────────────────────
-    print("▶ Phase 2: Extracting field structures …")
+    # ── Phase 2: Fields ───────────────────────────────────────────────────
+    print("▶ PHASE 2: Extracting field structures …")
+    t0 = time.monotonic()
+
     existing_fields = load_json(fields_path) or []
     existing_status = load_json(status_path) or []
-
     already_done = {s["table_name"] for s in existing_status if s["status"] in ("ok", "empty")}
+
     pending = [t for t in all_tables if t["table_name"] not in already_done]
-
     if args.max_tables > 0:
-        pending = pending[: args.max_tables]
+        pending = pending[:args.max_tables]
 
-    print(f"  Already processed: {len(already_done)}")
+    print(f"  Done:    {len(already_done)}")
     print(f"  Pending: {len(pending)}")
     print()
 
-    new_fields = []
-    new_status = []
-    batch_count = 0
-    SAVE_EVERY = 50
+    # Incremental saver
+    acc_fields = list(existing_fields)
+    acc_status = list(existing_status)
+
+    def save_incremental(chunk_f, chunk_s):
+        acc_fields.extend(chunk_f)
+        acc_status.extend(chunk_s)
+        save_json(fields_path, acc_fields)
+        save_json(status_path, acc_status)
 
     try:
-        for i, table in enumerate(pending, start=1):
-            table_name = table["table_name"]
-            table_url = table["table_url"]
+        await scraper.extract_fields(
+            pending,
+            save_callback=save_incremental,
+            batch_size=max(args.workers * 6, 48),
+        )
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        print("  ⚠ Extraction interrupted — partial data saved")
 
-            try:
-                fields = scraper.table_fields(table_name, table_url)
-                new_fields.extend(fields)
-                new_status.append({
-                    "source": table.get("source", "sapdatasheet"),
-                    "table_name": table_name,
-                    "table_url": table_url,
-                    "status": "ok" if fields else "empty",
-                    "field_count": len(fields),
-                    "error": None,
-                    "scraped_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                })
-            except Exception as exc:
-                new_status.append({
-                    "source": table.get("source", "sapdatasheet"),
-                    "table_name": table_name,
-                    "table_url": table_url,
-                    "status": "error",
-                    "field_count": 0,
-                    "error": str(exc)[:500],
-                    "scraped_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                })
+    elapsed = time.monotonic() - t0
+    print(f"  ✅ Field extraction done in {elapsed:.0f}s\n")
 
-            if i % 10 == 0 or i == len(pending):
-                print(f"  [{i}/{len(pending)}] Last: {table_name} — Fields batch: {len(new_fields)}")
-
-            # Periodic save
-            batch_count += 1
-            if batch_count >= SAVE_EVERY or i == len(pending):
-                all_fields = existing_fields + new_fields
-                all_status = existing_status + new_status
-                save_json(fields_path, all_fields)
-                save_json(status_path, all_status)
-                existing_fields = all_fields
-                existing_status = all_status
-                new_fields = []
-                new_status = []
-                batch_count = 0
-
-    except KeyboardInterrupt:
-        print("\n  ⚠ Field extraction interrupted — saving partial results")
-        if new_fields or new_status:
-            all_fields = existing_fields + new_fields
-            all_status = existing_status + new_status
-            save_json(fields_path, all_fields)
-            save_json(status_path, all_status)
-
-    final_fields = load_json(fields_path) or []
-    final_status = load_json(status_path) or []
-
-    # ── Phase 3: Write metadata ───────────────────────────────────────────
+    # ── Phase 3: Metadata ─────────────────────────────────────────────────
+    final_fields = load_json(fields_path) or acc_fields
+    final_status = load_json(status_path) or acc_status
     _write_metadata(meta_path, run_start, all_tables, final_fields, final_status)
-    scraper.close()
 
+    await scraper.close()
     print()
-    print(f"═══ Done! Total HTTP requests: {scraper._request_count} ═══")
+    print(f"═══ Done! {scraper.request_count} requests, {scraper.error_count} errors ═══")
 
 
-def _write_metadata(
-    meta_path: Path,
-    run_start: datetime,
-    tables: list,
-    fields: list,
-    status: list,
-) -> None:
+def _write_metadata(meta_path, run_start, tables, fields, status):
     run_end = datetime.now(timezone.utc)
 
-    ok_count = sum(1 for s in status if s["status"] == "ok")
-    empty_count = sum(1 for s in status if s["status"] == "empty")
-    error_count = sum(1 for s in status if s["status"] == "error")
-    total_tables = len(tables)
-    coverage = (ok_count + empty_count) / total_tables * 100 if total_tables else 0
+    ok = sum(1 for s in status if s["status"] == "ok")
+    empty = sum(1 for s in status if s["status"] == "empty")
+    errors = sum(1 for s in status if s["status"] == "error")
+    total = len(tables)
+    coverage = (ok + empty) / total * 100 if total else 0
 
-    # Category breakdown
-    categories: Dict[str, int] = {}
+    cats = {}
     for t in tables:
-        cat = t.get("table_category", "Unknown") or "Unknown"
-        categories[cat] = categories.get(cat, 0) + 1
+        c = t.get("table_category", "Unknown") or "Unknown"
+        cats[c] = cats.get(c, 0) + 1
 
-    # Data type breakdown
-    data_types: Dict[str, int] = {}
+    dtypes = {}
     for f in fields:
-        dt = f.get("data_type", "Unknown") or "Unknown"
-        data_types[dt] = data_types.get(dt, 0) + 1
+        d = f.get("data_type", "Unknown") or "Unknown"
+        dtypes[d] = dtypes.get(d, 0) + 1
 
-    # Top tables by field count
-    table_field_counts: Dict[str, int] = {}
+    tfc = {}
     for f in fields:
-        tn = f.get("table_name", "")
-        table_field_counts[tn] = table_field_counts.get(tn, 0) + 1
-    top_tables = sorted(table_field_counts.items(), key=lambda x: -x[1])[:20]
+        n = f.get("table_name", "")
+        tfc[n] = tfc.get(n, 0) + 1
+    top = sorted(tfc.items(), key=lambda x: -x[1])[:20]
 
-    metadata = {
+    meta = {
         "last_run": {
             "started_at_utc": run_start.isoformat(timespec="seconds"),
             "finished_at_utc": run_end.isoformat(timespec="seconds"),
             "duration_seconds": int((run_end - run_start).total_seconds()),
         },
         "summary": {
-            "total_tables_discovered": total_tables,
-            "tables_with_fields": ok_count,
-            "tables_empty": empty_count,
-            "tables_with_errors": error_count,
+            "total_tables_discovered": total,
+            "tables_with_fields": ok,
+            "tables_empty": empty,
+            "tables_with_errors": errors,
             "total_fields_extracted": len(fields),
             "coverage_percent": round(coverage, 2),
         },
         "breakdowns": {
-            "by_category": dict(sorted(categories.items(), key=lambda x: -x[1])),
-            "by_data_type": dict(sorted(data_types.items(), key=lambda x: -x[1])[:25]),
-            "top_tables_by_fields": [{"table": t, "fields": c} for t, c in top_tables],
+            "by_category": dict(sorted(cats.items(), key=lambda x: -x[1])),
+            "by_data_type": dict(sorted(dtypes.items(), key=lambda x: -x[1])[:25]),
+            "top_tables_by_fields": [{"table": t, "fields": c} for t, c in top],
         },
         "files": {
-            "sap_tables.json": {
-                "records": total_tables,
-                "description": "SAP ABAP table catalog (name, description, category, delivery class)",
-            },
-            "sap_fields.json": {
-                "records": len(fields),
-                "description": "Field/column structures for each SAP table",
-            },
-            "sap_status.json": {
-                "records": len(status),
-                "description": "Scraping status per table (ok/empty/error)",
-            },
+            "sap_tables.json": {"records": total, "description": "SAP ABAP table catalog"},
+            "sap_fields.json": {"records": len(fields), "description": "Field structures per table"},
+            "sap_status.json": {"records": len(status), "description": "Scraping status per table"},
         },
     }
 
-    save_json_pretty(meta_path, metadata)
-    print(f"\n  📊 Summary:")
-    print(f"     Tables: {total_tables}")
-    print(f"     Fields: {len(fields)}")
-    print(f"     Coverage: {coverage:.1f}%")
-    print(f"     Duration: {metadata['last_run']['duration_seconds']}s")
+    save_json_pretty(meta_path, meta)
+    print(f"  📊 Summary: {total} tables | {len(fields)} fields | {coverage:.1f}% coverage | {meta['last_run']['duration_seconds']}s")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="SAP Data Dictionary Scraper (Parallel)")
+    parser.add_argument("--max-tables", type=int, default=0, help="Max tables for field extraction (0=all)")
+    parser.add_argument("--workers", type=int, default=8, help="Concurrent HTTP workers (default: 8)")
+    parser.add_argument("--delay", type=float, default=0.3, help="Per-worker delay in seconds (default: 0.3)")
+    parser.add_argument("--skip-fields", action="store_true", help="Catalog only, skip field extraction")
+    args = parser.parse_args()
+    asyncio.run(async_main(args))
 
 
 if __name__ == "__main__":
