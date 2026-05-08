@@ -1,0 +1,956 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SAP Data Dictionary — Scraper Dashboard</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>">
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+  <!-- SheetJS for XLSX export -->
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+
+  <style>
+    :root {
+      --bg-primary: #0a0e1a;
+      --bg-secondary: #111827;
+      --bg-card: #1a2035;
+      --bg-card-hover: #1e2642;
+      --border: #2a3454;
+      --border-glow: #3b82f6;
+      --text-primary: #f1f5f9;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+      --accent-blue: #3b82f6;
+      --accent-cyan: #06b6d4;
+      --accent-emerald: #10b981;
+      --accent-amber: #f59e0b;
+      --accent-red: #ef4444;
+      --accent-purple: #8b5cf6;
+      --gradient-hero: linear-gradient(135deg, #0f172a 0%, #1e1b4b 50%, #0f172a 100%);
+      --gradient-card: linear-gradient(145deg, rgba(30, 41, 77, 0.5), rgba(17, 24, 39, 0.8));
+      --shadow-lg: 0 10px 40px rgba(0,0,0,0.4);
+      --shadow-glow: 0 0 20px rgba(59, 130, 246, 0.15);
+      --radius: 12px;
+      --radius-sm: 8px;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      font-family: 'DM Sans', sans-serif;
+      background: var(--bg-primary);
+      color: var(--text-primary);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    .mono { font-family: 'JetBrains Mono', monospace; }
+
+    /* ─── Animated background ─── */
+    .bg-grid {
+      position: fixed;
+      inset: 0;
+      z-index: 0;
+      background-image:
+        linear-gradient(rgba(59,130,246,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(59,130,246,0.03) 1px, transparent 1px);
+      background-size: 60px 60px;
+      pointer-events: none;
+    }
+
+    .bg-orb {
+      position: fixed;
+      border-radius: 50%;
+      filter: blur(100px);
+      pointer-events: none;
+      z-index: 0;
+    }
+    .bg-orb-1 { width: 600px; height: 600px; top: -200px; left: -200px; background: rgba(59,130,246,0.08); }
+    .bg-orb-2 { width: 500px; height: 500px; bottom: -150px; right: -150px; background: rgba(139,92,246,0.06); }
+    .bg-orb-3 { width: 400px; height: 400px; top: 50%; left: 60%; background: rgba(6,182,212,0.05); }
+
+    /* ─── Layout ─── */
+    .container {
+      position: relative;
+      z-index: 1;
+      max-width: 1280px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    /* ─── Header ─── */
+    .hero {
+      padding: 60px 0 40px;
+      text-align: center;
+    }
+
+    .hero-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 16px;
+      background: rgba(59,130,246,0.1);
+      border: 1px solid rgba(59,130,246,0.2);
+      border-radius: 999px;
+      font-size: 13px;
+      color: var(--accent-blue);
+      font-weight: 500;
+      margin-bottom: 20px;
+      letter-spacing: 0.02em;
+    }
+    .hero-badge .pulse {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--accent-emerald);
+      animation: pulse 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(1.3); }
+    }
+
+    .hero h1 {
+      font-size: clamp(2rem, 5vw, 3.2rem);
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      line-height: 1.15;
+      margin-bottom: 12px;
+    }
+    .hero h1 .gradient-text {
+      background: linear-gradient(135deg, var(--accent-blue), var(--accent-cyan), var(--accent-purple));
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .hero-subtitle {
+      font-size: 17px;
+      color: var(--text-secondary);
+      max-width: 600px;
+      margin: 0 auto;
+      line-height: 1.6;
+    }
+
+    /* ─── Last run banner ─── */
+    .last-run {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 24px;
+      flex-wrap: wrap;
+      margin: 32px 0 40px;
+      padding: 16px 28px;
+      background: var(--gradient-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      font-size: 14px;
+    }
+    .last-run .label { color: var(--text-muted); }
+    .last-run .value { color: var(--text-primary); font-weight: 600; }
+    .last-run .separator { color: var(--border); }
+
+    /* ─── Stats grid ─── */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+      margin-bottom: 40px;
+    }
+
+    .stat-card {
+      background: var(--gradient-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+      transition: all 0.3s ease;
+      position: relative;
+      overflow: hidden;
+    }
+    .stat-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 3px;
+      border-radius: var(--radius) var(--radius) 0 0;
+    }
+    .stat-card:nth-child(1)::before { background: var(--accent-blue); }
+    .stat-card:nth-child(2)::before { background: var(--accent-emerald); }
+    .stat-card:nth-child(3)::before { background: var(--accent-amber); }
+    .stat-card:nth-child(4)::before { background: var(--accent-cyan); }
+    .stat-card:nth-child(5)::before { background: var(--accent-purple); }
+    .stat-card:nth-child(6)::before { background: var(--accent-red); }
+
+    .stat-card:hover {
+      border-color: var(--border-glow);
+      box-shadow: var(--shadow-glow);
+      transform: translateY(-2px);
+    }
+
+    .stat-card .stat-label {
+      font-size: 13px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 8px;
+    }
+    .stat-card .stat-value {
+      font-size: 2rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      line-height: 1.1;
+    }
+    .stat-card .stat-detail {
+      font-size: 13px;
+      color: var(--text-secondary);
+      margin-top: 6px;
+    }
+
+    /* ─── Section titles ─── */
+    .section-title {
+      font-size: 1.3rem;
+      font-weight: 600;
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .section-title .icon {
+      width: 32px; height: 32px;
+      display: flex; align-items: center; justify-content: center;
+      background: rgba(59,130,246,0.1);
+      border-radius: var(--radius-sm);
+      font-size: 16px;
+    }
+
+    /* ─── Download section ─── */
+    .download-section {
+      margin-bottom: 48px;
+    }
+
+    .download-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 16px;
+    }
+
+    .download-card {
+      background: var(--gradient-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 20px 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .download-card-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .download-card-header h3 {
+      font-size: 15px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .file-badge {
+      font-size: 11px;
+      font-weight: 600;
+      padding: 3px 8px;
+      border-radius: 4px;
+      letter-spacing: 0.03em;
+    }
+    .file-badge.json { background: rgba(245,158,11,0.15); color: var(--accent-amber); }
+    .file-badge.tables { background: rgba(59,130,246,0.15); color: var(--accent-blue); }
+    .file-badge.fields { background: rgba(16,185,129,0.15); color: var(--accent-emerald); }
+    .file-badge.status { background: rgba(139,92,246,0.15); color: var(--accent-purple); }
+
+    .download-card-desc {
+      font-size: 13px;
+      color: var(--text-secondary);
+      line-height: 1.5;
+    }
+
+    .download-card-meta {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .download-buttons {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 16px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+      background: var(--bg-card);
+      color: var(--text-primary);
+      font-family: 'DM Sans', sans-serif;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      text-decoration: none;
+    }
+    .btn:hover {
+      border-color: var(--accent-blue);
+      background: rgba(59,130,246,0.08);
+      color: var(--accent-blue);
+    }
+    .btn:active { transform: scale(0.97); }
+    .btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+    .btn:disabled:hover {
+      border-color: var(--border);
+      background: var(--bg-card);
+      color: var(--text-primary);
+    }
+
+    .btn-primary {
+      background: var(--accent-blue);
+      border-color: var(--accent-blue);
+      color: white;
+    }
+    .btn-primary:hover {
+      background: #2563eb;
+      border-color: #2563eb;
+      color: white;
+    }
+
+    /* ─── Breakdown charts ─── */
+    .breakdowns {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(380px, 1fr));
+      gap: 24px;
+      margin-bottom: 48px;
+    }
+
+    .breakdown-card {
+      background: var(--gradient-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 24px;
+    }
+
+    .breakdown-card h3 {
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 16px;
+      color: var(--text-primary);
+    }
+
+    .bar-chart {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .bar-row {
+      display: grid;
+      grid-template-columns: 110px 1fr 60px;
+      align-items: center;
+      gap: 12px;
+      font-size: 13px;
+    }
+
+    .bar-label {
+      color: var(--text-secondary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      font-weight: 500;
+    }
+
+    .bar-track {
+      height: 22px;
+      background: rgba(59,130,246,0.06);
+      border-radius: 4px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .bar-fill {
+      height: 100%;
+      border-radius: 4px;
+      transition: width 1s ease;
+      min-width: 2px;
+    }
+
+    .bar-value {
+      text-align: right;
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+
+    /* color rotation for bars */
+    .bar-fill.c0 { background: linear-gradient(90deg, var(--accent-blue), #60a5fa); }
+    .bar-fill.c1 { background: linear-gradient(90deg, var(--accent-cyan), #22d3ee); }
+    .bar-fill.c2 { background: linear-gradient(90deg, var(--accent-emerald), #34d399); }
+    .bar-fill.c3 { background: linear-gradient(90deg, var(--accent-amber), #fbbf24); }
+    .bar-fill.c4 { background: linear-gradient(90deg, var(--accent-purple), #a78bfa); }
+    .bar-fill.c5 { background: linear-gradient(90deg, var(--accent-red), #f87171); }
+    .bar-fill.c6 { background: linear-gradient(90deg, #ec4899, #f472b6); }
+    .bar-fill.c7 { background: linear-gradient(90deg, #14b8a6, #2dd4bf); }
+
+    /* ─── Top tables ─── */
+    .top-tables-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    .top-tables-table th {
+      text-align: left;
+      padding: 10px 12px;
+      color: var(--text-muted);
+      font-weight: 500;
+      text-transform: uppercase;
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      border-bottom: 1px solid var(--border);
+    }
+    .top-tables-table td {
+      padding: 10px 12px;
+      border-bottom: 1px solid rgba(42,52,84,0.4);
+      color: var(--text-secondary);
+    }
+    .top-tables-table tr:hover td { color: var(--text-primary); }
+    .top-tables-table .table-name {
+      font-weight: 600;
+      color: var(--accent-cyan);
+    }
+
+    /* ─── Loading state ─── */
+    .loading-overlay {
+      position: fixed;
+      inset: 0;
+      background: var(--bg-primary);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 999;
+      transition: opacity 0.4s ease;
+    }
+    .loading-overlay.hidden { opacity: 0; pointer-events: none; }
+
+    .spinner {
+      width: 48px; height: 48px;
+      border: 3px solid var(--border);
+      border-top-color: var(--accent-blue);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-bottom: 16px;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ─── Empty state ─── */
+    .empty-state {
+      text-align: center;
+      padding: 60px 24px;
+      color: var(--text-muted);
+    }
+    .empty-state .big-icon { font-size: 48px; margin-bottom: 16px; }
+    .empty-state h2 { font-size: 1.2rem; color: var(--text-secondary); margin-bottom: 8px; }
+    .empty-state p { font-size: 14px; max-width: 400px; margin: 0 auto; line-height: 1.6; }
+
+    /* ─── Footer ─── */
+    .footer {
+      text-align: center;
+      padding: 32px 0;
+      font-size: 13px;
+      color: var(--text-muted);
+      border-top: 1px solid var(--border);
+      margin-top: 32px;
+    }
+    .footer a { color: var(--accent-blue); text-decoration: none; }
+    .footer a:hover { text-decoration: underline; }
+
+    /* ─── Responsive ─── */
+    @media (max-width: 640px) {
+      .hero { padding: 40px 0 24px; }
+      .stats-grid { grid-template-columns: repeat(2, 1fr); }
+      .breakdowns { grid-template-columns: 1fr; }
+      .download-grid { grid-template-columns: 1fr; }
+      .last-run { flex-direction: column; gap: 8px; }
+      .bar-row { grid-template-columns: 80px 1fr 50px; }
+    }
+
+    /* ─── Toast notification ─── */
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      padding: 12px 20px;
+      background: var(--bg-card);
+      border: 1px solid var(--accent-emerald);
+      border-radius: var(--radius-sm);
+      color: var(--accent-emerald);
+      font-size: 13px;
+      font-weight: 500;
+      z-index: 9999;
+      opacity: 0;
+      transform: translateY(12px);
+      transition: all 0.3s ease;
+      pointer-events: none;
+    }
+    .toast.show { opacity: 1; transform: translateY(0); }
+  </style>
+</head>
+<body>
+
+  <!-- Background effects -->
+  <div class="bg-grid"></div>
+  <div class="bg-orb bg-orb-1"></div>
+  <div class="bg-orb bg-orb-2"></div>
+  <div class="bg-orb bg-orb-3"></div>
+
+  <!-- Loading overlay -->
+  <div class="loading-overlay" id="loader">
+    <div class="spinner"></div>
+    <span style="color: var(--text-secondary); font-size: 14px;">Cargando datos del scraper…</span>
+  </div>
+
+  <!-- Toast -->
+  <div class="toast" id="toast"></div>
+
+  <!-- Main content -->
+  <div class="container" id="app" style="opacity: 0; transition: opacity 0.5s ease;">
+
+    <!-- Hero -->
+    <header class="hero">
+      <div class="hero-badge">
+        <span class="pulse"></span>
+        Actualización semanal automática
+      </div>
+      <h1>
+        <span class="gradient-text">SAP Data Dictionary</span><br>
+        Scraper Dashboard
+      </h1>
+      <p class="hero-subtitle">
+        Extracción automatizada del diccionario ABAP desde
+        <a href="https://www.sapdatasheet.org/abap/tabl/" target="_blank" style="color: var(--accent-cyan); text-decoration: none;">sapdatasheet.org</a>.
+        Tablas DDIC de SAP ECC y S/4HANA con estructura completa de campos.
+      </p>
+    </header>
+
+    <!-- Last run info -->
+    <div class="last-run" id="lastRunBanner">
+      <div>
+        <span class="label">Última extracción </span>
+        <span class="value mono" id="lastRunDate">—</span>
+      </div>
+      <span class="separator">|</span>
+      <div>
+        <span class="label">Duración </span>
+        <span class="value mono" id="lastRunDuration">—</span>
+      </div>
+      <span class="separator">|</span>
+      <div>
+        <span class="label">Cobertura </span>
+        <span class="value mono" id="lastRunCoverage">—</span>
+      </div>
+    </div>
+
+    <!-- Stats -->
+    <div class="stats-grid" id="statsGrid"></div>
+
+    <!-- Downloads -->
+    <div class="download-section">
+      <h2 class="section-title">
+        <span class="icon">⬇️</span>
+        Descargar Datos
+      </h2>
+      <div class="download-grid" id="downloadGrid"></div>
+    </div>
+
+    <!-- Breakdowns -->
+    <div id="breakdownsSection"></div>
+
+    <!-- Top tables -->
+    <div id="topTablesSection"></div>
+
+    <!-- Footer -->
+    <footer class="footer">
+      Datos extraídos de <a href="https://www.sapdatasheet.org" target="_blank">sapdatasheet.org</a> —
+      Scraper ejecutado via <a href="https://github.com/features/actions" target="_blank">GitHub Actions</a> cada domingo a las 03:00 UTC
+    </footer>
+  </div>
+
+  <script>
+    // ─── Utility functions ─────────────────────────────────────────────
+
+    function fmt(n) {
+      if (n === undefined || n === null) return '—';
+      return new Intl.NumberFormat('es-CL').format(n);
+    }
+
+    function fmtDate(iso) {
+      if (!iso) return '—';
+      const d = new Date(iso);
+      return d.toLocaleDateString('es-CL', {
+        year: 'numeric', month: 'short', day: 'numeric',
+        hour: '2-digit', minute: '2-digit', timeZoneName: 'short'
+      });
+    }
+
+    function fmtDuration(seconds) {
+      if (!seconds) return '—';
+      if (seconds < 60) return `${seconds}s`;
+      if (seconds < 3600) return `${Math.floor(seconds/60)}m ${seconds%60}s`;
+      const h = Math.floor(seconds / 3600);
+      const m = Math.floor((seconds % 3600) / 60);
+      return `${h}h ${m}m`;
+    }
+
+    function showToast(msg) {
+      const t = document.getElementById('toast');
+      t.textContent = msg;
+      t.classList.add('show');
+      setTimeout(() => t.classList.remove('show'), 3000);
+    }
+
+    // ─── Data loading ──────────────────────────────────────────────────
+
+    let META = null;
+    let DATA_CACHE = {};
+
+    async function loadMeta() {
+      const res = await fetch('data/metadata.json?t=' + Date.now());
+      if (!res.ok) throw new Error('metadata.json not found');
+      return res.json();
+    }
+
+    async function loadDataFile(filename) {
+      if (DATA_CACHE[filename]) return DATA_CACHE[filename];
+      const res = await fetch('data/' + filename + '?t=' + Date.now());
+      if (!res.ok) throw new Error(filename + ' not found');
+      const data = await res.json();
+      DATA_CACHE[filename] = data;
+      return data;
+    }
+
+    // ─── Export converters ─────────────────────────────────────────────
+
+    function jsonToCSV(data) {
+      if (!data.length) return '';
+      const headers = Object.keys(data[0]);
+      const escape = v => {
+        const s = String(v ?? '');
+        return s.includes(',') || s.includes('"') || s.includes('\n')
+          ? '"' + s.replace(/"/g, '""') + '"'
+          : s;
+      };
+      const lines = [headers.join(',')];
+      for (const row of data) {
+        lines.push(headers.map(h => escape(row[h])).join(','));
+      }
+      return lines.join('\n');
+    }
+
+    function jsonToTSV(data) {
+      if (!data.length) return '';
+      const headers = Object.keys(data[0]);
+      const escape = v => String(v ?? '').replace(/\t/g, ' ').replace(/\n/g, ' ');
+      const lines = [headers.join('\t')];
+      for (const row of data) {
+        lines.push(headers.map(h => escape(row[h])).join('\t'));
+      }
+      return lines.join('\n');
+    }
+
+    function downloadBlob(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showToast(`✓ Descargado: ${filename}`);
+    }
+
+    async function downloadAs(dataFile, format) {
+      try {
+        const data = await loadDataFile(dataFile);
+        const baseName = dataFile.replace('.json', '');
+
+        if (format === 'json') {
+          const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+          downloadBlob(blob, `${baseName}.json`);
+        }
+        else if (format === 'csv') {
+          const blob = new Blob(['\uFEFF' + jsonToCSV(data)], { type: 'text/csv;charset=utf-8' });
+          downloadBlob(blob, `${baseName}.csv`);
+        }
+        else if (format === 'tsv') {
+          const blob = new Blob(['\uFEFF' + jsonToTSV(data)], { type: 'text/tab-separated-values;charset=utf-8' });
+          downloadBlob(blob, `${baseName}.tsv`);
+        }
+        else if (format === 'xlsx') {
+          const ws = XLSX.utils.json_to_sheet(data);
+          const wb = XLSX.utils.book_new();
+          XLSX.utils.book_append_sheet(wb, ws, baseName.replace('sap_', '').substring(0, 31));
+          // Auto-width columns
+          const colWidths = Object.keys(data[0] || {}).map(k => {
+            const maxLen = Math.max(k.length, ...data.slice(0, 200).map(r => String(r[k] ?? '').length));
+            return { wch: Math.min(maxLen + 2, 50) };
+          });
+          ws['!cols'] = colWidths;
+          XLSX.writeFile(wb, `${baseName}.xlsx`);
+          showToast(`✓ Descargado: ${baseName}.xlsx`);
+        }
+        else if (format === 'sql') {
+          const tableName = baseName.toUpperCase();
+          const cols = Object.keys(data[0] || {});
+          const lines = [`-- ${tableName}: ${data.length} rows`, `-- Generated from SAP Data Dictionary Scraper`, ''];
+          lines.push(`CREATE TABLE IF NOT EXISTS ${tableName} (`);
+          lines.push(cols.map(c => `  ${c} TEXT`).join(',\n'));
+          lines.push(');\n');
+          for (const row of data) {
+            const vals = cols.map(c => {
+              const v = String(row[c] ?? '').replace(/'/g, "''");
+              return `'${v}'`;
+            });
+            lines.push(`INSERT INTO ${tableName} (${cols.join(', ')}) VALUES (${vals.join(', ')});`);
+          }
+          const blob = new Blob([lines.join('\n')], { type: 'text/sql;charset=utf-8' });
+          downloadBlob(blob, `${baseName}.sql`);
+        }
+      } catch (e) {
+        showToast(`⚠ Error: ${e.message}`);
+        console.error(e);
+      }
+    }
+
+    // Make it globally accessible for onclick handlers
+    window.downloadAs = downloadAs;
+
+    // ─── Rendering functions ───────────────────────────────────────────
+
+    function renderStats(summary) {
+      const grid = document.getElementById('statsGrid');
+      const stats = [
+        { label: 'Tablas descubiertas', value: fmt(summary.total_tables_discovered), detail: 'Catálogo DDIC ABAP completo' },
+        { label: 'Tablas con campos', value: fmt(summary.tables_with_fields), detail: 'Estructura extraída exitosamente' },
+        { label: 'Campos extraídos', value: fmt(summary.total_fields_extracted), detail: 'Total de columnas/campos SAP' },
+        { label: 'Cobertura', value: summary.coverage_percent + '%', detail: 'Tablas procesadas vs descubiertas' },
+        { label: 'Tablas vacías', value: fmt(summary.tables_empty), detail: 'Sin campos detectados' },
+        { label: 'Errores', value: fmt(summary.tables_with_errors), detail: 'Tablas con fallo en extracción' },
+      ];
+
+      grid.innerHTML = stats.map(s => `
+        <div class="stat-card">
+          <div class="stat-label">${s.label}</div>
+          <div class="stat-value">${s.value}</div>
+          <div class="stat-detail">${s.detail}</div>
+        </div>
+      `).join('');
+    }
+
+    function renderDownloads(files) {
+      const grid = document.getElementById('downloadGrid');
+      const fileConfigs = [
+        {
+          key: 'sap_tables.json',
+          icon: '📋',
+          badgeClass: 'tables',
+          badgeText: 'CATÁLOGO',
+        },
+        {
+          key: 'sap_fields.json',
+          icon: '🔧',
+          badgeClass: 'fields',
+          badgeText: 'CAMPOS',
+        },
+        {
+          key: 'sap_status.json',
+          icon: '📊',
+          badgeClass: 'status',
+          badgeText: 'ESTADO',
+        },
+      ];
+
+      const formats = [
+        { fmt: 'json', label: 'JSON', icon: '{ }' },
+        { fmt: 'csv', label: 'CSV', icon: '📄' },
+        { fmt: 'xlsx', label: 'Excel', icon: '📗' },
+        { fmt: 'tsv', label: 'TSV', icon: '⇥' },
+        { fmt: 'sql', label: 'SQL', icon: '🗃️' },
+      ];
+
+      grid.innerHTML = fileConfigs.map(fc => {
+        const info = files[fc.key] || {};
+        const disabled = !info.records;
+        return `
+          <div class="download-card">
+            <div class="download-card-header">
+              <h3>${fc.icon} ${fc.key}</h3>
+              <span class="file-badge ${fc.badgeClass}">${fc.badgeText}</span>
+            </div>
+            <div class="download-card-desc">${info.description || '—'}</div>
+            <div class="download-card-meta mono">${fmt(info.records)} registros</div>
+            <div class="download-buttons">
+              ${formats.map(f => `
+                <button class="btn" onclick="downloadAs('${fc.key}', '${f.fmt}')" ${disabled ? 'disabled' : ''}>
+                  ${f.icon} ${f.label}
+                </button>
+              `).join('')}
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderBreakdowns(breakdowns) {
+      const section = document.getElementById('breakdownsSection');
+
+      const renderBarChart = (data, maxBars = 12) => {
+        const entries = Object.entries(data).slice(0, maxBars);
+        if (!entries.length) return '<div style="color:var(--text-muted);font-size:13px;">Sin datos disponibles</div>';
+        const maxVal = Math.max(...entries.map(([, v]) => v));
+        return `<div class="bar-chart">
+          ${entries.map(([k, v], i) => `
+            <div class="bar-row">
+              <span class="bar-label mono" title="${k}">${k}</span>
+              <div class="bar-track">
+                <div class="bar-fill c${i % 8}" style="width: ${(v / maxVal * 100).toFixed(1)}%"></div>
+              </div>
+              <span class="bar-value mono">${fmt(v)}</span>
+            </div>
+          `).join('')}
+        </div>`;
+      };
+
+      let html = '<h2 class="section-title"><span class="icon">📈</span> Análisis de Datos</h2>';
+      html += '<div class="breakdowns">';
+
+      if (breakdowns.by_category && Object.keys(breakdowns.by_category).length) {
+        html += `
+          <div class="breakdown-card">
+            <h3>Distribución por Categoría de Tabla</h3>
+            ${renderBarChart(breakdowns.by_category)}
+          </div>
+        `;
+      }
+
+      if (breakdowns.by_data_type && Object.keys(breakdowns.by_data_type).length) {
+        html += `
+          <div class="breakdown-card">
+            <h3>Tipos de Datos ABAP más frecuentes</h3>
+            ${renderBarChart(breakdowns.by_data_type, 15)}
+          </div>
+        `;
+      }
+
+      html += '</div>';
+      section.innerHTML = html;
+    }
+
+    function renderTopTables(topTables) {
+      const section = document.getElementById('topTablesSection');
+      if (!topTables || !topTables.length) return;
+
+      let html = `
+        <h2 class="section-title"><span class="icon">🏆</span> Tablas con más campos</h2>
+        <div style="background:var(--gradient-card);border:1px solid var(--border);border-radius:var(--radius);overflow:hidden;margin-bottom:40px;">
+          <table class="top-tables-table">
+            <thead>
+              <tr>
+                <th style="width:50px">#</th>
+                <th>Tabla SAP</th>
+                <th style="text-align:right">Campos</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${topTables.map((t, i) => `
+                <tr>
+                  <td class="mono" style="color:var(--text-muted)">${i + 1}</td>
+                  <td>
+                    <span class="table-name mono">${t.table}</span>
+                  </td>
+                  <td class="mono" style="text-align:right;font-weight:600">${fmt(t.fields)}</td>
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+      section.innerHTML = html;
+    }
+
+    // ─── Initialize ────────────────────────────────────────────────────
+
+    async function init() {
+      const loader = document.getElementById('loader');
+      const app = document.getElementById('app');
+
+      try {
+        META = await loadMeta();
+
+        // Check if there's actual data
+        const hasData = META.summary.total_tables_discovered > 0;
+
+        // Last run banner
+        document.getElementById('lastRunDate').textContent = fmtDate(META.last_run.finished_at_utc);
+        document.getElementById('lastRunDuration').textContent = fmtDuration(META.last_run.duration_seconds);
+        document.getElementById('lastRunCoverage').textContent = META.summary.coverage_percent + '%';
+
+        if (hasData) {
+          renderStats(META.summary);
+          renderDownloads(META.files);
+          renderBreakdowns(META.breakdowns);
+          renderTopTables(META.breakdowns.top_tables_by_fields);
+        } else {
+          // Empty state
+          document.getElementById('statsGrid').innerHTML = '';
+          document.getElementById('downloadGrid').parentElement.innerHTML = `
+            <div class="empty-state">
+              <div class="big-icon">🚀</div>
+              <h2>Esperando primera extracción</h2>
+              <p>
+                El scraper se ejecuta automáticamente cada domingo a las 03:00 UTC
+                via GitHub Actions. También puedes activarlo manualmente desde la pestaña
+                <strong>Actions</strong> de este repositorio.
+              </p>
+            </div>
+          `;
+        }
+
+        // Show content
+        app.style.opacity = '1';
+        setTimeout(() => loader.classList.add('hidden'), 200);
+
+      } catch (err) {
+        console.error(err);
+        loader.innerHTML = `
+          <div class="empty-state">
+            <div class="big-icon">⚠️</div>
+            <h2>Error cargando datos</h2>
+            <p>${err.message}. Verifica que el archivo <code>data/metadata.json</code> existe en el repositorio.</p>
+          </div>
+        `;
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>
