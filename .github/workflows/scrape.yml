@@ -66,6 +66,7 @@ jobs:
           python scripts/scraper.py $ARGS
 
       - name: Commit and push data
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -87,6 +88,7 @@ jobs:
   # Deploy GitHub Pages after data is committed
   deploy-pages:
     needs: scrape
+    if: always()
     runs-on: ubuntu-latest
     environment:
       name: github-pages
