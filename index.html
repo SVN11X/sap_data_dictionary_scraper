@@ -639,10 +639,33 @@
 
     async function loadDataFile(filename) {
       if (DATA_CACHE[filename]) return DATA_CACHE[filename];
-      const res = await fetch('data/' + filename + '?t=' + Date.now());
-      if (!res.ok) throw new Error(filename + ' not found');
-      const data = await res.json();
+
+      // Try .json.gz first (compressed), fallback to .json (legacy)
+      let data;
+      const gzName = filename.endsWith('.json.gz') ? filename : filename.replace('.json', '.json.gz');
+      const rawName = filename.replace('.json.gz', '.json');
+
+      try {
+        const res = await fetch('data/' + gzName + '?t=' + Date.now());
+        if (res.ok) {
+          // Decompress gzip in browser using DecompressionStream
+          const ds = new DecompressionStream('gzip');
+          const decompressed = res.body.pipeThrough(ds);
+          const text = await new Response(decompressed).text();
+          data = JSON.parse(text);
+        } else {
+          throw new Error('gz not found');
+        }
+      } catch {
+        // Fallback to raw JSON
+        const res = await fetch('data/' + rawName + '?t=' + Date.now());
+        if (!res.ok) throw new Error(rawName + ' not found');
+        data = await res.json();
+      }
+
       DATA_CACHE[filename] = data;
+      DATA_CACHE[gzName] = data;
+      DATA_CACHE[rawName] = data;
       return data;
     }
 
@@ -690,7 +713,7 @@
     async function downloadAs(dataFile, format) {
       try {
         const data = await loadDataFile(dataFile);
-        const baseName = dataFile.replace('.json', '');
+        const baseName = dataFile.replace('.json.gz', '').replace('.json', '');
 
         if (format === 'json') {
           const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -768,24 +791,9 @@
     function renderDownloads(files) {
       const grid = document.getElementById('downloadGrid');
       const fileConfigs = [
-        {
-          key: 'sap_tables.json',
-          icon: '📋',
-          badgeClass: 'tables',
-          badgeText: 'CATÁLOGO',
-        },
-        {
-          key: 'sap_fields.json',
-          icon: '🔧',
-          badgeClass: 'fields',
-          badgeText: 'CAMPOS',
-        },
-        {
-          key: 'sap_status.json',
-          icon: '📊',
-          badgeClass: 'status',
-          badgeText: 'ESTADO',
-        },
+        { key: 'sap_tables', icon: '📋', badgeClass: 'tables', badgeText: 'CATÁLOGO' },
+        { key: 'sap_fields', icon: '🔧', badgeClass: 'fields', badgeText: 'CAMPOS' },
+        { key: 'sap_status', icon: '📊', badgeClass: 'status', badgeText: 'ESTADO' },
       ];
 
       const formats = [
@@ -797,7 +805,9 @@
       ];
 
       grid.innerHTML = fileConfigs.map(fc => {
-        const info = files[fc.key] || {};
+        // Support both .json and .json.gz keys in metadata
+        const info = files[fc.key + '.json.gz'] || files[fc.key + '.json'] || {};
+        const dataFile = fc.key + '.json';  // loadDataFile handles gz fallback
         const disabled = !info.records;
         return `
           <div class="download-card">
@@ -809,7 +819,7 @@
             <div class="download-card-meta mono">${fmt(info.records)} registros</div>
             <div class="download-buttons">
               ${formats.map(f => `
-                <button class="btn" onclick="downloadAs('${fc.key}', '${f.fmt}')" ${disabled ? 'disabled' : ''}>
+                <button class="btn" onclick="downloadAs('${dataFile}', '${f.fmt}')" ${disabled ? 'disabled' : ''}>
                   ${f.icon} ${f.label}
                 </button>
               `).join('')}
