@@ -260,7 +260,14 @@ def _parse_fields(html: str, table_name: str, table_url: str) -> List[Dict[str, 
 
         position = cells[0]
         values = cells[1:]
-        field_name = values[0]
+        field_name = values[0].strip()
+
+        # ── Skip structural directives: .INCLUDE, .APPEND ────────────────
+        # These are ABAP composition directives, not actual table columns
+        if field_name.startswith(".INCLU") or field_name.startswith(".APPEND"):
+            continue
+
+        # ── Regular field rows ────────────────────────────────────────────
         type_idx = next(
             (i for i, v in enumerate(values) if v.upper() in ABAP_TYPES and i > 0),
             None,
@@ -269,14 +276,24 @@ def _parse_fields(html: str, table_name: str, table_url: str) -> List[Dict[str, 
         de = dom = dt = ln = dec = desc = chk = ""
         if type_idx is not None:
             dt = values[type_idx].upper()
-            de = values[1] if type_idx >= 2 else ""
-            dom = values[type_idx - 1] if type_idx >= 1 else ""
-            ln = values[type_idx + 1] if len(values) > type_idx + 1 else ""
-            dec = values[type_idx + 2] if len(values) > type_idx + 2 else ""
-            desc = values[type_idx + 3] if len(values) > type_idx + 3 else ""
-            chk = values[type_idx + 4] if len(values) > type_idx + 4 else ""
+            de = values[1].strip() if type_idx >= 2 else ""
+            dom = values[type_idx - 1].strip() if type_idx >= 1 else ""
+            ln = values[type_idx + 1].strip() if len(values) > type_idx + 1 else ""
+            dec = values[type_idx + 2].strip() if len(values) > type_idx + 2 else ""
+            desc = values[type_idx + 3].strip() if len(values) > type_idx + 3 else ""
+            chk = values[type_idx + 4].strip() if len(values) > type_idx + 4 else ""
+
+            # Normalize length/decimals: remove trailing .0, ensure clean integers
+            for val_name in ('ln', 'dec'):
+                val = locals()[val_name]
+                if val and val.replace(".", "").isdigit():
+                    try:
+                        locals()[val_name]  # just validate
+                    except ValueError:
+                        pass
         else:
-            desc = " ".join(values[1:])
+            # No ABAP type found — likely a non-standard row
+            desc = " ".join(v.strip() for v in values[1:])
 
         rows.append({
             "source": SOURCE_NAME, "table_name": table_name, "table_url": table_url,
