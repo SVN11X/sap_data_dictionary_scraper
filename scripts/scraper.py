@@ -20,8 +20,10 @@ Usage:
 
 import argparse
 import asyncio
+import csv
 import gzip
 import json
+import io
 import os
 import re
 import signal
@@ -583,12 +585,55 @@ async def async_main(args):
     print(f"\n═══ Done! {scraper.request_count} requests, {scraper.error_count} errors ═══")
 
 
+def _generate_csv_gz(path: Path, records: list, label: str):
+    """Generate a gzipped CSV from a list of dicts."""
+    if not records:
+        return
+    headers = list(records[0].keys())
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=headers, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(records)
+    raw = buf.getvalue().encode("utf-8")
+    with gzip.open(path, "wb", compresslevel=6) as f:
+        f.write(raw)
+    gz_mb = path.stat().st_size / (1024 * 1024)
+    print(f"  📦 {path.name}: {len(records):,} rows → {gz_mb:.1f} MB")
+
+
+def _generate_csv_gz_from_jsonl(path: Path, jsonl_path: Path, label: str):
+    """Generate a gzipped CSV by streaming from JSONL (memory-efficient for millions of rows)."""
+    if not jsonl_path.exists():
+        return
+    headers = None
+    row_count = 0
+    with gzip.open(path, "wt", encoding="utf-8", compresslevel=6, newline="") as gz:
+        writer = None
+        with open(jsonl_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if writer is None:
+                    headers = list(obj.keys())
+                    writer = csv.DictWriter(gz, fieldnames=headers, lineterminator="\n")
+                    writer.writeheader()
+                writer.writerow(obj)
+                row_count += 1
+    gz_mb = path.stat().st_size / (1024 * 1024)
+    print(f"  📦 {path.name}: {row_count:,} rows → {gz_mb:.1f} MB")
+
+
 def _finalize(meta_path, tables_path, tables_gz, fields_jsonl, fields_gz,
               status_jsonl, status_gz, run_start, all_tables):
-    """Compress JSONL → .json.gz and write metadata."""
-    print("▶ PHASE 3: Compressing + metadata …")
+    """Compress JSONL → .json.gz, generate CSV.gz, and write metadata."""
+    print("▶ PHASE 3: Compressing + generating download files …")
 
-    # Compress tables
+    # Compress tables JSON
     save_json_gz(tables_gz, all_tables)
 
     # Compress fields JSONL → .json.gz
@@ -599,11 +644,16 @@ def _finalize(meta_path, tables_path, tables_gz, fields_jsonl, fields_gz,
     # Compress status JSONL → .json.gz
     status_writer = JsonlWriter(status_jsonl)
     status_records = status_writer.read_all()
-    # Deduplicate status: keep latest entry per table_name
     status_dedup = {}
     for s in status_records:
         status_dedup[s["table_name"]] = s
     status_final = sorted(status_dedup.values(), key=lambda s: s["table_name"])
+    save_json_gz(status_gz, status_final)
+
+    # ── Pre-generate CSV.gz files (so browser doesn't have to convert) ────
+    _generate_csv_gz(DATA_DIR / "sap_tables.csv.gz", all_tables, "sap_tables")
+    _generate_csv_gz_from_jsonl(DATA_DIR / "sap_fields.csv.gz", fields_jsonl, "sap_fields")
+    _generate_csv_gz(DATA_DIR / "sap_status.csv.gz", status_final, "sap_status")
     save_json_gz(status_gz, status_final)
 
     # Read fields for metadata stats (scan JSONL without loading all into memory)
@@ -658,8 +708,11 @@ def _finalize(meta_path, tables_path, tables_gz, fields_jsonl, fields_gz,
         },
         "files": {
             "sap_tables.json.gz": {"records": total, "description": "SAP ABAP table catalog"},
+            "sap_tables.csv.gz": {"records": total, "description": "SAP ABAP table catalog (CSV)"},
             "sap_fields.json.gz": {"records": fields_count, "description": "Field structures per table"},
+            "sap_fields.csv.gz": {"records": fields_count, "description": "Field structures per table (CSV)"},
             "sap_status.json.gz": {"records": len(status_final), "description": "Scraping status per table"},
+            "sap_status.csv.gz": {"records": len(status_final), "description": "Scraping status per table (CSV)"},
         },
     }
 
