@@ -144,6 +144,18 @@
     "sap_status.json.gz": {
       "records": 113093,
       "description": "Scraping status per table"
+    },
+    "sap_tables.csv.gz": {
+      "records": 113093,
+      "description": "SAP ABAP table catalog (CSV)"
+    },
+    "sap_fields.csv.gz": {
+      "records": 1341219,
+      "description": "Field structures per table (CSV)"
+    },
+    "sap_status.csv.gz": {
+      "records": 113093,
+      "description": "Scraping status per table (CSV)"
     }
   }
 }
