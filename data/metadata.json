@@ -1,16 +1,16 @@
 {
   "last_run": {
-    "started_at_utc": "2026-05-09T03:53:13+00:00",
-    "finished_at_utc": "2026-05-09T03:55:09+00:00",
-    "duration_seconds": 116
+    "started_at_utc": "2026-05-09T04:07:11+00:00",
+    "finished_at_utc": "2026-05-09T06:08:04+00:00",
+    "duration_seconds": 7252
   },
   "summary": {
     "total_tables_discovered": 113093,
-    "tables_with_fields": 8,
+    "tables_with_fields": 113093,
     "tables_empty": 0,
     "tables_with_errors": 0,
-    "total_fields_extracted": 241,
-    "coverage_percent": 0.01
+    "total_fields_extracted": 1341219,
+    "coverage_percent": 100.0
   },
   "breakdowns": {
     "by_category": {
@@ -24,52 +24,111 @@
       "S": 2
     },
     "by_data_type": {
-      "CHAR": 133,
-      "RAW": 25,
-      "DATS": 21,
-      "CURR": 14,
-      "CUKY": 11,
-      "CLNT": 8,
-      "NUMC": 7,
-      "TIMS": 5,
-      "DEC": 5,
-      "QUAN": 5,
-      "UNIT": 4,
-      "INT4": 2,
-      "INT2": 1
+      "CHAR": 687218,
+      "Unknown": 230361,
+      "NUMC": 97329,
+      "CLNT": 86173,
+      "DATS": 53100,
+      "DEC": 40768,
+      "CURR": 35365,
+      "LANG": 21517,
+      "RAW": 18208,
+      "INT4": 16122,
+      "TIMS": 13157,
+      "QUAN": 12947,
+      "UNIT": 9183,
+      "CUKY": 8824,
+      "INT2": 3740,
+      "FLTP": 2749,
+      "INT1": 2720,
+      "LRAW": 1206,
+      "STRING": 207,
+      "LCHR": 181,
+      "ACCP": 124,
+      "PREC": 13,
+      "SSTRING": 4,
+      "RAWSTRING": 3
     },
     "top_tables_by_fields": [
       {
-        "table": "/1BEA/CRMB_BDI",
-        "fields": 58
+        "table": "T5ITT7",
+        "fields": 511
       },
       {
-        "table": "/1BEA/CRMB_BDH",
-        "fields": 37
+        "table": "GLE_FI_ITEM_MODF",
+        "fields": 483
       },
       {
-        "table": "/1BEA/BBEA_BDH",
-        "fields": 27
+        "table": "GLE_FI_ITEM_ORIG",
+        "fields": 483
       },
       {
-        "table": "/1BEA/BBEA_DLI",
-        "fields": 27
+        "table": "BSEG",
+        "fields": 403
       },
       {
-        "table": "/1BEA/CNPL_PDL",
-        "fields": 27
+        "table": "TLVC_DFT_ASSGN",
+        "fields": 400
       },
       {
-        "table": "/1BEA/BBEA_BDI",
-        "fields": 23
+        "table": "PA0146",
+        "fields": 395
       },
       {
-        "table": "/1BEA/CNPL_PLH",
-        "fields": 21
+        "table": "PA0701",
+        "fields": 394
       },
       {
-        "table": "/1BEA/CNPL_PLI",
-        "fields": 21
+        "table": "N2CA02",
+        "fields": 392
+      },
+      {
+        "table": "PA0008",
+        "fields": 374
+      },
+      {
+        "table": "PB0008",
+        "fields": 373
+      },
+      {
+        "table": "LIPS",
+        "fields": 371
+      },
+      {
+        "table": "DGMSD",
+        "fields": 367
+      },
+      {
+        "table": "DDDDLCURRTYPES",
+        "fields": 361
+      },
+      {
+        "table": "DDDDLDECTYPES",
+        "fields": 361
+      },
+      {
+        "table": "DDDDLQUANTYPES",
+        "fields": 361
+      },
+      {
+        "table": "PA0706",
+        "fields": 361
+      },
+      {
+        "table": "GLPOS_N_CT",
+        "fields": 331
+      },
+      {
+        "table": "N2CA09",
+        "fields": 328
+      },
+      {
+        "table": "GLPOS_C_CT",
+        "fields": 322
+      },
+      {
+        "table": "VBAP",
+        "fields": 322
       }
     ]
   },
@@ -79,11 +138,11 @@
       "description": "SAP ABAP table catalog"
     },
     "sap_fields.json.gz": {
-      "records": 241,
+      "records": 1341219,
       "description": "Field structures per table"
     },
     "sap_status.json.gz": {
-      "records": 8,
+      "records": 113093,
       "description": "Scraping status per table"
     }
   }
