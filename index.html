@@ -710,8 +710,27 @@
       showToast(`✓ Descargado: ${filename}`);
     }
 
+    // Direct download of pre-built gz files (no processing needed)
+    function downloadDirect(filename) {
+      const a = document.createElement('a');
+      a.href = 'data/' + filename;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      showToast(`✓ Descargando: ${filename}`);
+    }
+
+    // Client-side conversion (only for datasets < MAX_CLIENT_ROWS)
+    const MAX_CLIENT_ROWS = 200000;
+    const XLSX_MAX_ROWS = 1048576;
+
     async function downloadAs(dataFile, format) {
+      const btn = event?.target;
+      const originalText = btn?.textContent;
       try {
+        if (btn) { btn.textContent = '⏳ …'; btn.disabled = true; }
+
         const data = await loadDataFile(dataFile);
         const baseName = dataFile.replace('.json.gz', '').replace('.json', '');
 
@@ -728,10 +747,13 @@
           downloadBlob(blob, `${baseName}.tsv`);
         }
         else if (format === 'xlsx') {
+          if (data.length > XLSX_MAX_ROWS) {
+            showToast(`⚠ Excel soporta máx ${fmt(XLSX_MAX_ROWS)} filas. Usa CSV.`);
+            return;
+          }
           const ws = XLSX.utils.json_to_sheet(data);
           const wb = XLSX.utils.book_new();
           XLSX.utils.book_append_sheet(wb, ws, baseName.replace('sap_', '').substring(0, 31));
-          // Auto-width columns
           const colWidths = Object.keys(data[0] || {}).map(k => {
             const maxLen = Math.max(k.length, ...data.slice(0, 200).map(r => String(r[k] ?? '').length));
             return { wch: Math.min(maxLen + 2, 50) };
@@ -743,28 +765,25 @@
         else if (format === 'sql') {
           const tableName = baseName.toUpperCase();
           const cols = Object.keys(data[0] || {});
-          const lines = [`-- ${tableName}: ${data.length} rows`, `-- Generated from SAP Data Dictionary Scraper`, ''];
-          lines.push(`CREATE TABLE IF NOT EXISTS ${tableName} (`);
-          lines.push(cols.map(c => `  ${c} TEXT`).join(',\n'));
-          lines.push(');\n');
+          const chunks = [`-- ${tableName}: ${data.length} rows\n-- SAP Data Dictionary Scraper\n`];
+          chunks.push(`CREATE TABLE IF NOT EXISTS ${tableName} (\n${cols.map(c => '  ' + c + ' TEXT').join(',\n')}\n);\n`);
           for (const row of data) {
-            const vals = cols.map(c => {
-              const v = String(row[c] ?? '').replace(/'/g, "''");
-              return `'${v}'`;
-            });
-            lines.push(`INSERT INTO ${tableName} (${cols.join(', ')}) VALUES (${vals.join(', ')});`);
+            const vals = cols.map(c => "'" + String(row[c] ?? '').replace(/'/g, "''") + "'");
+            chunks.push(`INSERT INTO ${tableName} (${cols.join(', ')}) VALUES (${vals.join(', ')});`);
           }
-          const blob = new Blob([lines.join('\n')], { type: 'text/sql;charset=utf-8' });
+          const blob = new Blob([chunks.join('\n')], { type: 'text/sql;charset=utf-8' });
           downloadBlob(blob, `${baseName}.sql`);
         }
       } catch (e) {
         showToast(`⚠ Error: ${e.message}`);
         console.error(e);
+      } finally {
+        if (btn) { btn.textContent = originalText; btn.disabled = false; }
       }
     }
 
-    // Make it globally accessible for onclick handlers
     window.downloadAs = downloadAs;
+    window.downloadDirect = downloadDirect;
 
     // ─── Rendering functions ───────────────────────────────────────────
 
@@ -796,19 +815,69 @@
         { key: 'sap_status', icon: '📊', badgeClass: 'status', badgeText: 'ESTADO' },
       ];
 
-      const formats = [
-        { fmt: 'json', label: 'JSON', icon: '{ }' },
-        { fmt: 'csv', label: 'CSV', icon: '📄' },
-        { fmt: 'xlsx', label: 'Excel', icon: '📗' },
-        { fmt: 'tsv', label: 'TSV', icon: '⇥' },
-        { fmt: 'sql', label: 'SQL', icon: '🗃️' },
-      ];
-
       grid.innerHTML = fileConfigs.map(fc => {
-        // Support both .json and .json.gz keys in metadata
         const info = files[fc.key + '.json.gz'] || files[fc.key + '.json'] || {};
-        const dataFile = fc.key + '.json';  // loadDataFile handles gz fallback
-        const disabled = !info.records;
+        const csvInfo = files[fc.key + '.csv.gz'] || {};
+        const records = info.records || 0;
+        const isLarge = records > MAX_CLIENT_ROWS;
+        const exceedsXlsx = records > XLSX_MAX_ROWS;
+        const dataFile = fc.key + '.json';
+
+        // Pre-built direct downloads (always work, no browser processing)
+        let directSection = `
+          <div style="margin-bottom:8px">
+            <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.05em">
+              Descarga directa (pre-generados)
+            </div>
+            <div class="download-buttons">
+              <button class="btn btn-primary" onclick="downloadDirect('${fc.key}.json.gz')" ${!records ? 'disabled' : ''}>
+                📦 JSON.gz
+              </button>
+              <button class="btn btn-primary" onclick="downloadDirect('${fc.key}.csv.gz')" ${!records ? 'disabled' : ''}>
+                📦 CSV.gz
+              </button>
+            </div>
+          </div>
+        `;
+
+        // Client-side conversions (only for small datasets)
+        let clientSection = '';
+        if (isLarge) {
+          clientSection = `
+            <div style="margin-top:4px">
+              <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.05em">
+                Conversión en navegador ${exceedsXlsx ? '' : '(puede demorar)'}
+              </div>
+              <div class="download-buttons">
+                ${exceedsXlsx
+                  ? `<button class="btn" disabled title="Excel soporta máx 1.048.576 filas">📗 Excel (límite excedido)</button>`
+                  : `<button class="btn" onclick="downloadAs('${dataFile}', 'xlsx')">📗 Excel</button>`
+                }
+                <button class="btn" onclick="downloadAs('${dataFile}', 'json')">{ } JSON</button>
+              </div>
+              <div style="font-size:11px;color:var(--accent-amber);margin-top:6px">
+                ⚠ ${fmt(records)} registros — TSV y SQL deshabilitados por tamaño.
+                Usa CSV.gz o JSON.gz para conjuntos grandes.
+              </div>
+            </div>
+          `;
+        } else {
+          clientSection = `
+            <div style="margin-top:4px">
+              <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.05em">
+                Convertir en navegador
+              </div>
+              <div class="download-buttons">
+                <button class="btn" onclick="downloadAs('${dataFile}', 'json')" ${!records ? 'disabled' : ''}>{ } JSON</button>
+                <button class="btn" onclick="downloadAs('${dataFile}', 'csv')" ${!records ? 'disabled' : ''}>📄 CSV</button>
+                <button class="btn" onclick="downloadAs('${dataFile}', 'xlsx')" ${!records ? 'disabled' : ''}>📗 Excel</button>
+                <button class="btn" onclick="downloadAs('${dataFile}', 'tsv')" ${!records ? 'disabled' : ''}>⇥ TSV</button>
+                <button class="btn" onclick="downloadAs('${dataFile}', 'sql')" ${!records ? 'disabled' : ''}>🗃️ SQL</button>
+              </div>
+            </div>
+          `;
+        }
+
         return `
           <div class="download-card">
             <div class="download-card-header">
@@ -816,14 +885,9 @@
               <span class="file-badge ${fc.badgeClass}">${fc.badgeText}</span>
             </div>
             <div class="download-card-desc">${info.description || '—'}</div>
-            <div class="download-card-meta mono">${fmt(info.records)} registros</div>
-            <div class="download-buttons">
-              ${formats.map(f => `
-                <button class="btn" onclick="downloadAs('${dataFile}', '${f.fmt}')" ${disabled ? 'disabled' : ''}>
-                  ${f.icon} ${f.label}
-                </button>
-              `).join('')}
-            </div>
+            <div class="download-card-meta mono">${fmt(records)} registros</div>
+            ${directSection}
+            ${clientSection}
           </div>
         `;
       }).join('');
