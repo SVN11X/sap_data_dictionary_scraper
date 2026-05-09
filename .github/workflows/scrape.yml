@@ -37,13 +37,14 @@ permissions:
 jobs:
   scrape:
     runs-on: ubuntu-latest
-    timeout-minutes: 360  # 6 hours max
+    timeout-minutes: 540  # 9 hours max
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          lfs: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -77,9 +78,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+          # Remove raw JSON files that exceed GitHub's 100MB limit
+          find data/ -name "*.json" -size +95M -exec rm -f {} \; 2>/dev/null || true
+
+          # Add all data files: .json, .json.gz, .jsonl, metadata
           git add data/
 
-          # Check if there are changes
           if git diff --staged --quiet; then
             echo "No changes to commit."
           else
