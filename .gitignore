@@ -8,3 +8,9 @@ dist/
 build/
 .DS_Store
 Thumbs.db
+ 
+# JSONL files are too large for GitHub (400+ MB)
+# Only compressed .json.gz versions are committed
+# Scraper restores JSONL from .json.gz on resume
+data/*.jsonl
+data/*.tmp
