@@ -731,14 +731,30 @@
       try {
         if (btn) { btn.textContent = '⏳ …'; btn.disabled = true; }
 
-        const data = await loadDataFile(dataFile);
         const baseName = dataFile.replace('.json.gz', '').replace('.json', '');
 
+        // JSON: stream decompress from .gz without parsing (memory-safe for any size)
         if (format === 'json') {
-          const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-          downloadBlob(blob, `${baseName}.json`);
+          const gzName = baseName + '.json.gz';
+          try {
+            const res = await fetch('data/' + gzName);
+            if (res.ok && res.body) {
+              const ds = new DecompressionStream('gzip');
+              const decompressed = res.body.pipeThrough(ds);
+              const blob = await new Response(decompressed).blob();
+              downloadBlob(new Blob([blob], { type: 'application/json' }), `${baseName}.json`);
+              return;
+            }
+          } catch { /* fallback */ }
+          const data = await loadDataFile(dataFile);
+          downloadBlob(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }), `${baseName}.json`);
+          return;
         }
-        else if (format === 'csv') {
+
+        // All other formats need data loaded into memory
+        const data = await loadDataFile(dataFile);
+
+        if (format === 'csv') {
           const blob = new Blob(['\uFEFF' + jsonToCSV(data)], { type: 'text/csv;charset=utf-8' });
           downloadBlob(blob, `${baseName}.csv`);
         }
@@ -840,24 +856,27 @@
           </div>
         `;
 
-        // Client-side conversions (only for small datasets)
+        // Client-side conversions
         let clientSection = '';
         if (isLarge) {
           clientSection = `
             <div style="margin-top:4px">
               <div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:0.05em">
-                Conversión en navegador ${exceedsXlsx ? '' : '(puede demorar)'}
+                Conversión en navegador
               </div>
               <div class="download-buttons">
+                <button class="btn" onclick="downloadAs('${dataFile}', 'json')">{ } JSON</button>
+                <button class="btn" onclick="downloadAs('${dataFile}', 'csv')">📄 CSV</button>
                 ${exceedsXlsx
-                  ? `<button class="btn" disabled title="Excel soporta máx 1.048.576 filas">📗 Excel (límite excedido)</button>`
+                  ? `<button class="btn" disabled title="Excel soporta máx 1.048.576 filas">📗 Excel ✗</button>`
                   : `<button class="btn" onclick="downloadAs('${dataFile}', 'xlsx')">📗 Excel</button>`
                 }
-                <button class="btn" onclick="downloadAs('${dataFile}', 'json')">{ } JSON</button>
+                <button class="btn" onclick="downloadAs('${dataFile}', 'tsv')">⇥ TSV</button>
+                <button class="btn" onclick="downloadAs('${dataFile}', 'sql')">🗃️ SQL</button>
               </div>
               <div style="font-size:11px;color:var(--accent-amber);margin-top:6px">
-                ⚠ ${fmt(records)} registros — TSV y SQL deshabilitados por tamaño.
-                Usa CSV.gz o JSON.gz para conjuntos grandes.
+                ⚠ ${fmt(records)} registros — la conversión puede demorar o fallar según tu navegador y RAM disponible.
+                Para máxima confiabilidad usa las descargas directas JSON.gz / CSV.gz.
               </div>
             </div>
           `;
