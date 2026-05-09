@@ -1,0 +1,90 @@
+{
+  "last_run": {
+    "started_at_utc": "2026-05-09T03:53:13+00:00",
+    "finished_at_utc": "2026-05-09T03:55:09+00:00",
+    "duration_seconds": 116
+  },
+  "summary": {
+    "total_tables_discovered": 113093,
+    "tables_with_fields": 8,
+    "tables_empty": 0,
+    "tables_with_errors": 0,
+    "total_fields_extracted": 241,
+    "coverage_percent": 0.01
+  },
+  "breakdowns": {
+    "by_category": {
+      "TRANSP": 110735,
+      "POOL": 2002,
+      "C": 209,
+      "CLUSTER": 77,
+      "A": 59,
+      "E": 5,
+      "L": 4,
+      "S": 2
+    },
+    "by_data_type": {
+      "CHAR": 133,
+      "RAW": 25,
+      "DATS": 21,
+      "CURR": 14,
+      "CUKY": 11,
+      "CLNT": 8,
+      "NUMC": 7,
+      "TIMS": 5,
+      "DEC": 5,
+      "QUAN": 5,
+      "UNIT": 4,
+      "INT4": 2,
+      "INT2": 1
+    },
+    "top_tables_by_fields": [
+      {
+        "table": "/1BEA/CRMB_BDI",
+        "fields": 58
+      },
+      {
+        "table": "/1BEA/CRMB_BDH",
+        "fields": 37
+      },
+      {
+        "table": "/1BEA/BBEA_BDH",
+        "fields": 27
+      },
+      {
+        "table": "/1BEA/BBEA_DLI",
+        "fields": 27
+      },
+      {
+        "table": "/1BEA/CNPL_PDL",
+        "fields": 27
+      },
+      {
+        "table": "/1BEA/BBEA_BDI",
+        "fields": 23
+      },
+      {
+        "table": "/1BEA/CNPL_PLH",
+        "fields": 21
+      },
+      {
+        "table": "/1BEA/CNPL_PLI",
+        "fields": 21
+      }
+    ]
+  },
+  "files": {
+    "sap_tables.json.gz": {
+      "records": 113093,
+      "description": "SAP ABAP table catalog"
+    },
+    "sap_fields.json.gz": {
+      "records": 241,
+      "description": "Field structures per table"
+    },
+    "sap_status.json.gz": {
+      "records": 8,
+      "description": "Scraping status per table"
+    }
+  }
+}
