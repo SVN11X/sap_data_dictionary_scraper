@@ -1,8 +1,8 @@
 {
   "last_run": {
-    "started_at_utc": "2026-05-09T04:07:11+00:00",
-    "finished_at_utc": "2026-05-09T06:08:04+00:00",
-    "duration_seconds": 7252
+    "started_at_utc": "2026-05-10T06:15:02+00:00",
+    "finished_at_utc": "2026-05-10T06:17:49+00:00",
+    "duration_seconds": 167
   },
   "summary": {
     "total_tables_discovered": 113093,
@@ -137,21 +137,21 @@
       "records": 113093,
       "description": "SAP ABAP table catalog"
     },
-    "sap_fields.json.gz": {
-      "records": 1341219,
-      "description": "Field structures per table"
-    },
-    "sap_status.json.gz": {
-      "records": 113093,
-      "description": "Scraping status per table"
-    },
     "sap_tables.csv.gz": {
       "records": 113093,
       "description": "SAP ABAP table catalog (CSV)"
     },
+    "sap_fields.json.gz": {
+      "records": 1341219,
+      "description": "Field structures per table"
+    },
     "sap_fields.csv.gz": {
       "records": 1341219,
       "description": "Field structures per table (CSV)"
+    },
+    "sap_status.json.gz": {
+      "records": 113093,
+      "description": "Scraping status per table"
     },
     "sap_status.csv.gz": {
       "records": 113093,
