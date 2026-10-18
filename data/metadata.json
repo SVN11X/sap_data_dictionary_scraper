@@ -1,8 +1,8 @@
 {
   "last_run": {
-    "started_at_utc": "2026-10-11T09:47:18+00:00",
-    "finished_at_utc": "2026-10-11T09:48:52+00:00",
-    "duration_seconds": 93
+    "started_at_utc": "2026-10-18T07:52:17+00:00",
+    "finished_at_utc": "2026-10-18T07:54:43+00:00",
+    "duration_seconds": 146
   },
   "summary": {
     "total_tables_discovered": 113093,
